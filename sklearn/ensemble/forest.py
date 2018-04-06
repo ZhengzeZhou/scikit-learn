@@ -75,17 +75,20 @@ __all__ = ["RandomForestClassifier",
 MAX_INT = np.iinfo(np.int32).max
 
 
-def _generate_sample_indices(random_state, n_samples):
+def _generate_sample_indices(random_state, n_samples, n_subsamples=None):
     """Private function used to _parallel_build_trees function."""
     random_instance = check_random_state(random_state)
-    sample_indices = random_instance.randint(0, n_samples, n_samples)
+    if n_subsamples == None:
+        sample_indices = random_instance.randint(0, n_samples, n_samples)
+    else:
+        # Subsample without replacement
+        sample_indices = random_instance.choice(range(n_samples), n_subsamples, replace=False)
 
     return sample_indices
 
-
-def _generate_unsampled_indices(random_state, n_samples):
+def _generate_unsampled_indices(random_state, n_samples, subsamples=None):
     """Private function used to forest._set_oob_score function."""
-    sample_indices = _generate_sample_indices(random_state, n_samples)
+    sample_indices = _generate_sample_indices(random_state, n_samples, n_subsamples)
     sample_counts = np.bincount(sample_indices, minlength=n_samples)
     unsampled_mask = sample_counts == 0
     indices_range = np.arange(n_samples)
@@ -95,7 +98,7 @@ def _generate_unsampled_indices(random_state, n_samples):
 
 
 def _parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_trees,
-                          verbose=0, class_weight=None):
+                          verbose=0, class_weight=None, n_subsamples=None):
     """Private function used to fit a single tree in parallel."""
     if verbose > 1:
         print("building tree %d of %d" % (tree_idx + 1, n_trees))
@@ -107,7 +110,7 @@ def _parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_trees,
         else:
             curr_sample_weight = sample_weight.copy()
 
-        indices = _generate_sample_indices(tree.random_state, n_samples)
+        indices = _generate_sample_indices(tree.random_state, n_samples, n_subsamples)
         sample_counts = np.bincount(indices, minlength=n_samples)
         curr_sample_weight *= sample_counts
 
@@ -123,6 +126,7 @@ def _parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_trees,
         tree.fit(X, y, sample_weight=sample_weight, check_input=False)
 
     return tree
+
 
 
 class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
@@ -217,7 +221,7 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
 
         return sparse_hstack(indicators).tocsr(), n_nodes_ptr
 
-    def fit(self, X, y, sample_weight=None):
+    def fit(self, X, y, sample_weight=None, n_subsamples=None):
         """Build a forest of trees from the training set (X, y).
 
         Parameters
@@ -323,7 +327,7 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
                              backend="threading")(
                 delayed(_parallel_build_trees)(
                     t, self, X, y, sample_weight, i, len(trees),
-                    verbose=self.verbose, class_weight=self.class_weight)
+                    verbose=self.verbose, class_weight=self.class_weight, n_subsamples=n_subsamples)
                 for i, t in enumerate(trees))
 
             # Collect newly grown trees
