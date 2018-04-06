@@ -508,7 +508,7 @@ class BaseDecisionTree(six.with_metaclass(ABCMeta, BaseEstimator)):
         """
         check_is_fitted(self, 'tree_')
 
-        return self.tree_.compute_feature_importances()
+        return self.tree_.compute_feature_importances(normalize = False)
 
 
 # =============================================================================
