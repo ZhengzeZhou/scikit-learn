@@ -259,6 +259,10 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
         # Remap output
         n_samples, self.n_features_ = X.shape
 
+        # Needed in variance related functions
+        self.n_samples_ = n_samples
+        self.n_subsamples_ = n_subsamples
+
         y = np.atleast_1d(y)
         if y.ndim == 2 and y.shape[1] == 1:
             warn("A column-vector y was passed when a 1d array was"
@@ -376,6 +380,98 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
             for tree in self.estimators_)
 
         return sum(all_importances) / len(self.estimators_)
+
+    @property
+    def inbag_times_(self):
+        """ Return n_samples by n_estimators array which keeps track of which samples are
+            "in-bag" in which trees.
+
+        Returns
+        -------
+        inbag_times_ : array, shape = [n_samples, n_estimators]
+        """
+        inbag = np.zeros((self.n_samples_, self.n_estimators))
+        for t_idx in range(self.n_estimators):
+            sample_idx = _generate_sample_indices(self.estimators_[t_idx].random_state, self.n_samples_, self.n_subsamples_)
+            inbag[:, t_idx] = np.bincount(sample_idx, minlength=self.n_samples_)
+
+        return inbag
+
+    @property
+    def feature_importances_all_(self):
+        """Return feature importance (the higher, the more important the
+           feature) for each sub-estimator.
+
+        Returns
+        -------
+        feature_importances_all_ : array, shape = [n_features, n_estimators]
+        """    
+        all_= np.zeros((self.n_features_, self.n_estimators))
+        for t_idx in range(self.n_estimators):
+            all_[:, t_idx] = self.estimators_[t_idx].feature_importances_
+
+        return all_
+
+    def calc_feature_variance(self, matrix=False, method="BU", returnAll=False):
+        """Return the variance of feature importances. If matrix == True, return covariance matrix.
+
+        Parameters
+        ----------
+        matrix: Boolean, indicate whether to return a covariance matrix.
+        method: "BU" or "IJ", choose Balanced Variance Estimation Method or Infinitesimal Jackknife.
+        returnAll: Boolean, whether zeta1_full and zetan_full are returned. Only use when method == "BU".
+
+        Returns
+        -------
+        variance : array, shape = [n_features]   
+        or 
+        covariance: array, shape = [n_features, n_features]
+
+        Reference: http://www.jmlr.org/papers/volume17/14-168/14-168.pdf     
+        """
+        feature_importances_all_ = self.feature_importances_all_
+        inbag_times_ = self.inbag_times_
+
+        if method == "BU":
+            cond_exp_full = np.zeros((self.n_samples_, self.n_features_))
+
+            for i in range(self.n_samples_):
+                cond_exp_full[i, :] = np.mean(feature_importances_all_[:, inbag_times_[i, :]==1], axis=1)
+
+            if matrix == False:
+                zeta1_full = np.zeros(self.n_features_)
+                zetan_full = np.zeros(self.n_features_)
+                variance = np.zeros(self.n_features_)
+                for i in range(self.n_features_):
+                    zeta1_full[i] = np.var(cond_exp_full[:, i])
+                    zetan_full[i] = np.var(feature_importances_all_[i, :])
+                variance = zeta1_full * (self.n_subsamples_ ** 2) / self.n_samples_ + zetan_full / self.n_estimators
+                if returnAll == False:
+                    return variance
+                else:
+                    return dict({"variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
+            else:
+                zeta1_full = np.cov(cond_exp_full.T)
+                zetan_full = np.cov(feature_importances_all_)
+                covariance = (self.n_subsamples_ ** 2) / self.n_samples_ * zeta1_full + zetan_full / self.n_estimators
+                if returnAll == False:
+                    return variance
+                else:
+                    return dict({"variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
+
+        elif method == "IJ":
+            f_centered = feature_importances_all_ - np.mean(feature_importances_all_, axis=1).reshape(self.n_features_, 1)
+            i_centered = self.inbag_times_ - np.mean(self.inbag_times_, axis=1).reshape(self.n_samples_, 1)
+            corr = np.dot(f_centered, i_centered.T) / self.n_estimators
+            cov = np.dot(corr, corr.T)
+            zetan_full = np.cov(feature_importances_all_)
+            covariance = cov + zetan_full / self.n_estimators
+            if matrix == True:
+                return covariance 
+            else:
+                return np.diagonal(covariance)
+
+
 
 
 # This is a utility function for joblib's Parallel. It can't go locally in
