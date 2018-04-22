@@ -384,7 +384,7 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
     @property
     def inbag_times_(self):
         """ Return n_samples by n_estimators array which keeps track of which samples are
-            "in-bag" in which trees.
+            "in-bag" in which trees for how many times.
 
         Returns
         -------
