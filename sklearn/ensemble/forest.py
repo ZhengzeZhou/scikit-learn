@@ -86,7 +86,7 @@ def _generate_sample_indices(random_state, n_samples, n_subsamples=None):
 
     return sample_indices
 
-def _generate_unsampled_indices(random_state, n_samples, subsamples=None):
+def _generate_unsampled_indices(random_state, n_samples, n_subsamples=None):
     """Private function used to forest._set_oob_score function."""
     sample_indices = _generate_sample_indices(random_state, n_samples, n_subsamples)
     sample_counts = np.bincount(sample_indices, minlength=n_samples)
@@ -727,6 +727,85 @@ class ForestClassifier(six.with_metaclass(ABCMeta, BaseForest,
 
             return proba
 
+    def oob_FI(self, X, y, n_subsamples_oob=None):
+
+	    VI = np.array([0.] * self.n_features_)
+	    
+	    n_estimators = self.n_estimators
+	    n = self.n_samples_
+
+	    for index, tree in enumerate(self.estimators_):
+	        
+	        temp = np.array([0.] * self.n_features_)
+
+	        n_nodes = tree.tree_.node_count
+	        
+	        tree_X_inbag = X.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+	        tree_y_inbag = y.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+	        decision_path_inbag = tree.decision_path(tree_X_inbag).todense()
+	        impurity_inbag = [0] * n_nodes
+	        
+	        outofbag_index = (self.inbag_times_[:, index] == 0)
+
+	        tree_X = X[outofbag_index]
+	        tree_y = y[outofbag_index]
+	        n_outofbag = len(tree_y)
+
+	        if n_subsamples_oob != None:
+
+	        	assert n_subsamples_oob <= n_outofbag
+
+	        	idx = np.random.choice(n_outofbag, n_subsamples_oob, replace = False)
+
+	        	tree_X = tree_X[idx]
+	        	tree_y = tree_y[idx]
+	        	n_outofbag = len(tree_y)
+	        
+	        decision_path = tree.decision_path(tree_X).todense()
+
+	        impurity = [0] * n_nodes
+
+	        weighted_n_node_samples = np.array(np.sum(decision_path, axis = 0))[0]
+
+	        for i in range(n_nodes):
+	            
+	            arr1 = tree_y[np.array(decision_path[:, i]).ravel().nonzero()[0].tolist()]
+	            arr2 = tree_y_inbag[np.array(decision_path_inbag[:, i]).ravel().nonzero()[0].tolist()]
+	            
+	            if len(arr1) == 0 or len(arr2) == 0:
+	                impurity[i] = 0
+	            else:
+	                p1 = float(sum(arr1)) / len(arr1)
+	                pp1 = float(sum(arr2)) / len(arr2)
+	                p2 = 1 - p1
+	                pp2 = 1- pp1
+
+	                impurity[i] = 1 - p1 * pp1 - p2 * pp2
+
+	        for node in range(n_nodes):
+
+	            if tree.tree_.children_left[node] == -1 and tree.tree_.children_right[node] == -1:
+	                continue
+	                
+	            assert tree.tree_.children_left[node] != -1
+	            assert tree.tree_.children_right[node] != -1
+
+	            v = tree.tree_.feature[node]
+
+	            node_left = tree.tree_.children_left[node]
+	            node_right = tree.tree_.children_right[node]
+	            
+	            assert weighted_n_node_samples[node] == weighted_n_node_samples[node_left] + weighted_n_node_samples[node_right]
+	            
+	            incre = (weighted_n_node_samples[node] * impurity[node] -
+	                                weighted_n_node_samples[node_left] * impurity[node_left] -
+	                                weighted_n_node_samples[node_right] * impurity[node_right])
+
+	            temp[v] += incre
+	        
+	        VI += temp / len(tree_y)
+	        
+	    return VI / n_estimators  	
 
 class ForestRegressor(six.with_metaclass(ABCMeta, BaseForest, RegressorMixin)):
     """Base class for forest of trees-based regressors.
@@ -839,6 +918,48 @@ class ForestRegressor(six.with_metaclass(ABCMeta, BaseForest, RegressorMixin)):
                                         predictions[:, k])
 
         self.oob_score_ /= self.n_outputs_
+
+
+    def oob_FI(self, X, y, n_subsamples_oob=None):
+
+	    VI = np.array([0.] * self.n_features_)
+	    
+	    n_estimators = self.n_estimators
+	    n = self.n_samples_
+
+	    for index, tree in enumerate(self.estimators_):
+
+	        outofbag_index = (self.inbag_times_[:, index] == 0)
+	        
+	        x_oob = X[outofbag_index]
+	        y_oob = y[outofbag_index]
+	        n_outofbag = len(y_oob)
+
+	        if n_subsamples_oob != None:
+
+	        	assert n_subsamples_oob <= n_outofbag
+
+	        	idx = np.random.choice(n_outofbag, n_subsamples_oob, replace = False)
+
+	        	x_oob = x_oob[idx]
+	        	y_oob = y_oob[idx]
+	        	n_outofbag = len(y_oob)
+
+	        for i in range(n_outofbag):
+
+	            ix = x_oob[i, ]
+	            iy = y_oob[i]
+
+	            nodes = np.arange(tree.tree_.capacity)[np.array(tree.decision_path(ix.reshape(1, -1)).todense())[0] == 1]
+
+	            values = tree.tree_.value.reshape(-1)[nodes]
+
+	            for j in range(len(nodes)-1):
+	                index_node = nodes[j]
+	                v = tree.tree_.feature[index_node]
+	                VI[v] += (iy - values[j]) ** 2 - (iy - values[j+1]) ** 2 
+	        
+	    return VI / n_outofbag / n_estimators
 
 
 class RandomForestClassifier(ForestClassifier):
