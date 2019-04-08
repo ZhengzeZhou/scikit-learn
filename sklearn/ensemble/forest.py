@@ -75,20 +75,23 @@ __all__ = ["RandomForestClassifier",
 MAX_INT = np.iinfo(np.int32).max
 
 
-def _generate_sample_indices(random_state, n_samples, n_subsamples=None):
+def _generate_sample_indices(random_state, n_samples, n_subsamples=None, replace=False):
     """Private function used to _parallel_build_trees function."""
     random_instance = check_random_state(random_state)
     if n_subsamples == None:
         sample_indices = random_instance.randint(0, n_samples, n_samples)
-    else:
+    elif replace == False:
         # Subsample without replacement
         sample_indices = random_instance.choice(range(n_samples), n_subsamples, replace=False)
+    else:
+    	# Subsample with replacement
+        sample_indices = random_instance.choice(range(n_samples), n_subsamples, replace=True)
 
     return sample_indices
 
-def _generate_unsampled_indices(random_state, n_samples, n_subsamples=None):
+def _generate_unsampled_indices(random_state, n_samples, n_subsamples=None, replace=False):
     """Private function used to forest._set_oob_score function."""
-    sample_indices = _generate_sample_indices(random_state, n_samples, n_subsamples)
+    sample_indices = _generate_sample_indices(random_state, n_samples, n_subsamples, replace)
     sample_counts = np.bincount(sample_indices, minlength=n_samples)
     unsampled_mask = sample_counts == 0
     indices_range = np.arange(n_samples)
@@ -98,7 +101,7 @@ def _generate_unsampled_indices(random_state, n_samples, n_subsamples=None):
 
 
 def _parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_trees,
-                          verbose=0, class_weight=None, n_subsamples=None):
+                          verbose=0, class_weight=None, n_subsamples=None, replace=False):
     """Private function used to fit a single tree in parallel."""
     if verbose > 1:
         print("building tree %d of %d" % (tree_idx + 1, n_trees))
@@ -110,7 +113,7 @@ def _parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_trees,
         else:
             curr_sample_weight = sample_weight.copy()
 
-        indices = _generate_sample_indices(tree.random_state, n_samples, n_subsamples)
+        indices = _generate_sample_indices(tree.random_state, n_samples, n_subsamples, replace)
         sample_counts = np.bincount(indices, minlength=n_samples)
         curr_sample_weight *= sample_counts
 
@@ -221,7 +224,7 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
 
         return sparse_hstack(indicators).tocsr(), n_nodes_ptr
 
-    def fit(self, X, y, sample_weight=None, n_subsamples=None):
+    def fit(self, X, y, sample_weight=None, n_subsamples=None, replace=False):
         """Build a forest of trees from the training set (X, y).
 
         Parameters
@@ -262,6 +265,7 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
         # Needed in variance related functions
         self.n_samples_ = n_samples
         self.n_subsamples_ = n_subsamples
+        self.replace = replace
 
         y = np.atleast_1d(y)
         if y.ndim == 2 and y.shape[1] == 1:
@@ -331,7 +335,7 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
                              backend="threading")(
                 delayed(_parallel_build_trees)(
                     t, self, X, y, sample_weight, i, len(trees),
-                    verbose=self.verbose, class_weight=self.class_weight, n_subsamples=n_subsamples)
+                    verbose=self.verbose, class_weight=self.class_weight, n_subsamples=n_subsamples, replace=replace)
                 for i, t in enumerate(trees))
 
             # Collect newly grown trees
@@ -392,7 +396,7 @@ class BaseForest(six.with_metaclass(ABCMeta, BaseEnsemble)):
         """
         inbag = np.zeros((self.n_samples_, self.n_estimators))
         for t_idx in range(self.n_estimators):
-            sample_idx = _generate_sample_indices(self.estimators_[t_idx].random_state, self.n_samples_, self.n_subsamples_)
+            sample_idx = _generate_sample_indices(self.estimators_[t_idx].random_state, self.n_samples_, self.n_subsamples_, self.replace)
             inbag[:, t_idx] = np.bincount(sample_idx, minlength=self.n_samples_)
 
         return inbag
@@ -727,85 +731,132 @@ class ForestClassifier(six.with_metaclass(ABCMeta, BaseForest,
 
             return proba
 
-    def oob_FI(self, X, y, n_subsamples_oob=None):
+    def oob_FI(self, X, y, n_subsamples_oob=None, var=None):
 
-	    VI = np.array([0.] * self.n_features_)
-	    
-	    n_estimators = self.n_estimators
-	    n = self.n_samples_
+        VI = np.array([0.] * self.n_features_)
+        
+        n_estimators = self.n_estimators
+        n = self.n_samples_
 
-	    for index, tree in enumerate(self.estimators_):
-	        
-	        temp = np.array([0.] * self.n_features_)
+        all_= np.zeros((self.n_features_, self.n_estimators))
 
-	        n_nodes = tree.tree_.node_count
-	        
-	        tree_X_inbag = X.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
-	        tree_y_inbag = y.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
-	        decision_path_inbag = tree.decision_path(tree_X_inbag).todense()
-	        impurity_inbag = [0] * n_nodes
-	        
-	        outofbag_index = (self.inbag_times_[:, index] == 0)
+        for index, tree in enumerate(self.estimators_):
+            
+            temp = np.array([0.] * self.n_features_)
 
-	        tree_X = X[outofbag_index]
-	        tree_y = y[outofbag_index]
-	        n_outofbag = len(tree_y)
+            n_nodes = tree.tree_.node_count
+            
+            tree_X_inbag = X.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+            tree_y_inbag = y.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+            decision_path_inbag = tree.decision_path(tree_X_inbag).todense()
+            impurity_inbag = [0] * n_nodes
 
-	        if n_subsamples_oob != None:
 
-	        	assert n_subsamples_oob <= n_outofbag
 
-	        	idx = np.random.choice(n_outofbag, n_subsamples_oob, replace = False)
+            if n_subsamples_oob != None:
 
-	        	tree_X = tree_X[idx]
-	        	tree_y = tree_y[idx]
-	        	n_outofbag = len(tree_y)
-	        
-	        decision_path = tree.decision_path(tree_X).todense()
+                tree_random_instance = check_random_state(tree.random_state)
+                unsampled_indices = _generate_unsampled_indices(tree_random_instance, self.n_samples_, self.n_subsamples_)
 
-	        impurity = [0] * n_nodes
+                assert n_subsamples_oob <= len(unsampled_indices)
 
-	        weighted_n_node_samples = np.array(np.sum(decision_path, axis = 0))[0]
+                idx = tree_random_instance.choice(unsampled_indices, n_subsamples_oob, replace=False)
 
-	        for i in range(n_nodes):
-	            
-	            arr1 = tree_y[np.array(decision_path[:, i]).ravel().nonzero()[0].tolist()]
-	            arr2 = tree_y_inbag[np.array(decision_path_inbag[:, i]).ravel().nonzero()[0].tolist()]
-	            
-	            if len(arr1) == 0 or len(arr2) == 0:
-	                impurity[i] = 0
-	            else:
-	                p1 = float(sum(arr1)) / len(arr1)
-	                pp1 = float(sum(arr2)) / len(arr2)
-	                p2 = 1 - p1
-	                pp2 = 1- pp1
+                tree_X = X[idx]
+                tree_y = y[idx]
+                n_outofbag = len(tree_y)
 
-	                impurity[i] = 1 - p1 * pp1 - p2 * pp2
+            else:
+                outofbag_index = (self.inbag_times_[:, index] == 0)
+                tree_X = X[outofbag_index]
+                tree_y = y[outofbag_index]
+                n_outofbag = len(tree_y)
 
-	        for node in range(n_nodes):
+            decision_path = tree.decision_path(tree_X).todense()
 
-	            if tree.tree_.children_left[node] == -1 and tree.tree_.children_right[node] == -1:
-	                continue
-	                
-	            assert tree.tree_.children_left[node] != -1
-	            assert tree.tree_.children_right[node] != -1
+            impurity = [0] * n_nodes
 
-	            v = tree.tree_.feature[node]
+            weighted_n_node_samples = np.array(np.sum(decision_path, axis = 0))[0]
 
-	            node_left = tree.tree_.children_left[node]
-	            node_right = tree.tree_.children_right[node]
-	            
-	            assert weighted_n_node_samples[node] == weighted_n_node_samples[node_left] + weighted_n_node_samples[node_right]
-	            
-	            incre = (weighted_n_node_samples[node] * impurity[node] -
-	                                weighted_n_node_samples[node_left] * impurity[node_left] -
-	                                weighted_n_node_samples[node_right] * impurity[node_right])
+            for i in range(n_nodes):
+                
+                arr1 = tree_y[np.array(decision_path[:, i]).ravel().nonzero()[0].tolist()]
+                arr2 = tree_y_inbag[np.array(decision_path_inbag[:, i]).ravel().nonzero()[0].tolist()]
+                
+                if len(arr1) == 0 or len(arr2) == 0:
+                    impurity[i] = 0
+                else:
+                    p1 = float(sum(arr1)) / len(arr1)
+                    pp1 = float(sum(arr2)) / len(arr2)
+                    p2 = 1 - p1
+                    pp2 = 1- pp1
 
-	            temp[v] += incre
-	        
-	        VI += temp / len(tree_y)
-	        
-	    return VI / n_estimators  	
+                    impurity[i] = 1 - p1 * pp1 - p2 * pp2
+
+            for node in range(n_nodes):
+
+                if tree.tree_.children_left[node] == -1 and tree.tree_.children_right[node] == -1:
+                    continue
+                    
+                assert tree.tree_.children_left[node] != -1
+                assert tree.tree_.children_right[node] != -1
+
+                v = tree.tree_.feature[node]
+
+                node_left = tree.tree_.children_left[node]
+                node_right = tree.tree_.children_right[node]
+                
+                assert weighted_n_node_samples[node] == weighted_n_node_samples[node_left] + weighted_n_node_samples[node_right]
+                
+                incre = (weighted_n_node_samples[node] * impurity[node] -
+                                    weighted_n_node_samples[node_left] * impurity[node_left] -
+                                    weighted_n_node_samples[node_right] * impurity[node_right])
+
+                temp[v] += incre
+
+                all_[:, index] = temp / len(tree_y)
+            
+            VI += temp / len(tree_y)
+        
+        if var == None:
+            return VI / n_estimators
+        else:
+
+            print("Starting variance estimation...")
+
+            inbag = np.zeros((self.n_samples_, self.n_estimators))
+            for t_idx in range(self.n_estimators):
+                sample_idx = _generate_sample_indices(self.estimators_[t_idx].random_state, self.n_samples_, self.n_subsamples_)
+                unsampled_indices = _generate_unsampled_indices(self.estimators_[t_idx].random_state, self.n_samples_, self.n_subsamples_)
+                idx = check_random_state(self.estimators_[t_idx].random_state).choice(unsampled_indices, n_subsamples_oob, replace=False)
+                inbag[:, t_idx] = np.bincount(np.append(sample_idx, idx), minlength=self.n_samples_)
+
+                assert sum(inbag[:, t_idx]) == self.n_subsamples_ + n_subsamples_oob
+
+            feature_importances_all_ = all_
+            inbag_times_ = inbag
+
+            cond_exp_full = np.zeros((self.n_samples_, self.n_features_))
+
+            for i in range(self.n_samples_):
+                cond_exp_full[i, :] = np.mean(feature_importances_all_[:, inbag_times_[i, :]==1], axis=1)
+
+            if var == "vector":
+                # zeta1_full = np.zeros(self.n_features_)
+                # zetan_full = np.zeros(self.n_features_)
+                # variance = np.zeros(self.n_features_)
+                # for i in range(self.n_features_):
+                #     zeta1_full[i] = np.var(cond_exp_full[:, i])
+                #     zetan_full[i] = np.var(feature_importances_all_[i, :])
+                zeta1_full = np.var(cond_exp_full, axis = 0)
+                zetan_full = np.var(feature_importances_all_, axis = 1)
+                variance = zeta1_full * ((self.n_subsamples_ + n_subsamples_oob) ** 2) / self.n_samples_ + zetan_full / self.n_estimators
+                return dict({"FI": VI / n_estimators, "variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
+            else:
+                zeta1_full = np.cov(cond_exp_full.T)
+                zetan_full = np.cov(feature_importances_all_)
+                covariance = ((self.n_subsamples_ + n_subsamples_oob) ** 2) / self.n_samples_ * zeta1_full + zetan_full / self.n_estimators
+                return dict({"FI": VI / n_estimators, "variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
 
 class ForestRegressor(six.with_metaclass(ABCMeta, BaseForest, RegressorMixin)):
     """Base class for forest of trees-based regressors.
@@ -877,6 +928,57 @@ class ForestRegressor(six.with_metaclass(ABCMeta, BaseForest, RegressorMixin)):
 
         return y_hat
 
+    def predict_var(self, X, matrix=False, method="BU", returnAll=False):
+
+        predict_all = np.zeros((X.shape[0], self.n_estimators))
+        for t_idx in range(self.n_estimators):
+            predict_all[:, t_idx] = self.estimators_[t_idx].predict(X)
+        pred = np.mean(predict_all, axis = 1)
+
+        inbag_times_ = self.inbag_times_
+
+        m = X.shape[0]
+
+        if method == "BU":
+            cond_exp_full = np.zeros((self.n_samples_, m))
+
+            for i in range(self.n_samples_):
+                cond_exp_full[i, :] = np.mean(predict_all[:, inbag_times_[i, :]==1], axis=1)
+
+            if matrix == False:
+                zeta1_full = np.zeros(m)
+                zetan_full = np.zeros(m)
+                variance = np.zeros(m)
+                for i in range(m):
+                    zeta1_full[i] = np.var(cond_exp_full[:, i])
+                    zetan_full[i] = np.var(predict_all[i, :])
+                variance = zeta1_full * (self.n_subsamples_ ** 2) / self.n_samples_ + zetan_full / self.n_estimators
+                if returnAll == False:
+                    return variance
+                else:
+                    return dict({"pred": pred, "variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
+            else:
+                zeta1_full = np.cov(cond_exp_full.T)
+                zetan_full = np.cov(predict_all)
+                covariance = (self.n_subsamples_ ** 2) / self.n_samples_ * zeta1_full + zetan_full / self.n_estimators
+                if returnAll == False:
+                    return variance
+                else:
+                    return dict({"pred": pred, "variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
+        elif method == "IJ":
+            f_centered = predict_all - np.mean(predict_all, axis=1).reshape(m, 1)
+            i_centered = inbag_times_ - np.mean(inbag_times_, axis=1).reshape(self.n_samples_, 1)
+            corr = np.dot(f_centered, i_centered.T) / self.n_estimators
+            cov = np.dot(corr, corr.T)
+            zetan_full = np.cov(predict_all)
+            covariance = cov + zetan_full / self.n_estimators
+            if matrix == True:
+                return covariance 
+            else:
+                return np.diagonal(covariance)
+
+        
+
     def _set_oob_score(self, X, y):
         """Compute out-of-bag scores"""
         X = check_array(X, dtype=DTYPE, accept_sparse='csr')
@@ -919,47 +1021,288 @@ class ForestRegressor(six.with_metaclass(ABCMeta, BaseForest, RegressorMixin)):
 
         self.oob_score_ /= self.n_outputs_
 
+    def oob_FI(self, X, y, n_subsamples_oob=None, var=None):
 
-    def oob_FI(self, X, y, n_subsamples_oob=None):
+        VI = np.array([0.] * self.n_features_)
 
-	    VI = np.array([0.] * self.n_features_)
-	    
-	    n_estimators = self.n_estimators
-	    n = self.n_samples_
+        VI_train = np.array([0.] * self.n_features_)
 
-	    for index, tree in enumerate(self.estimators_):
+        n_estimators = self.n_estimators
+        
+        n = self.n_samples_
 
-	        outofbag_index = (self.inbag_times_[:, index] == 0)
-	        
-	        x_oob = X[outofbag_index]
-	        y_oob = y[outofbag_index]
-	        n_outofbag = len(y_oob)
+        for index, tree in enumerate(self.estimators_):
 
-	        if n_subsamples_oob != None:
+            temp = np.array([0.] * self.n_features_)
+            temp_train = np.array([0.] * self.n_features_)
 
-	        	assert n_subsamples_oob <= n_outofbag
+            n_nodes = tree.tree_.node_count
 
-	        	idx = np.random.choice(n_outofbag, n_subsamples_oob, replace = False)
+            if n_subsamples_oob != None:
 
-	        	x_oob = x_oob[idx]
-	        	y_oob = y_oob[idx]
-	        	n_outofbag = len(y_oob)
+                tree_random_instance = check_random_state(tree.random_state)
+                unsampled_indices = _generate_unsampled_indices(tree_random_instance, self.n_samples_, self.n_subsamples_)
 
-	        for i in range(n_outofbag):
+                assert n_subsamples_oob <= len(unsampled_indices)
 
-	            ix = x_oob[i, ]
-	            iy = y_oob[i]
+                idx = tree_random_instance.choice(unsampled_indices, n_subsamples_oob, replace=False)
 
-	            nodes = np.arange(tree.tree_.capacity)[np.array(tree.decision_path(ix.reshape(1, -1)).todense())[0] == 1]
+                tree_X = X[idx]
+                tree_y = y[idx]
+                n_outofbag = len(tree_y)
 
-	            values = tree.tree_.value.reshape(-1)[nodes]
+            else:
+                outofbag_index = (self.inbag_times_[:, index] == 0)
+                tree_X = X[outofbag_index]
+                tree_y = y[outofbag_index]
+                n_outofbag = len(tree_y)
+        
+            tree_X_inbag = X.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+            tree_y_inbag = y.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+            decision_path_inbag = tree.decision_path(tree_X_inbag).todense()
+        
+            decision_path = tree.decision_path(tree_X).todense()
 
-	            for j in range(len(nodes)-1):
-	                index_node = nodes[j]
-	                v = tree.tree_.feature[index_node]
-	                VI[v] += (iy - values[j]) ** 2 - (iy - values[j+1]) ** 2 
-	        
-	    return VI / n_outofbag / n_estimators
+            impurity = [0] * n_nodes
+            impurity_train = tree.tree_.impurity
+
+            flag = [True] * n_nodes
+
+            # weighted_n_node_samples = np.array(np.sum(decision_path, axis = 0))[0]
+            weighted_n_node_samples = np.array(np.sum(decision_path_inbag, axis = 0))[0]
+        
+            for i in range(n_nodes):
+            
+                arr1 = tree_y[np.array(decision_path[:, i]).ravel().nonzero()[0].tolist()]
+                arr2 = tree_y_inbag[np.array(decision_path_inbag[:, i]).ravel().nonzero()[0].tolist()]
+            
+                if len(arr1) == 0:
+                    impurity[i] = 0
+                    # flag[i] = False
+                    if sum(tree.tree_.children_left == i) > 0:
+                        parent_node = np.arange(n_nodes)[tree.tree_.children_left == i][0]
+                        flag[parent_node] = False
+                    else:
+                        parent_node = np.arange(n_nodes)[tree.tree_.children_right == i][0]
+                        flag[parent_node] = False
+                else:
+#                 p1 = float(sum(arr1)) / len(arr1)
+#                 pp1 = float(sum(arr2)) / len(arr2)
+#                 p2 = 1 - p1
+#                 pp2 = 1- pp1
+
+#                 impurity[i] = 1 - p1 * pp1 - p2 * pp2
+                  impurity[i] = np.sum((arr1 - np.mean(arr2)) ** 2) / len(arr1)
+
+            for node in range(n_nodes):
+
+                if tree.tree_.children_left[node] == -1 and tree.tree_.children_right[node] == -1:
+                    continue
+                
+                assert tree.tree_.children_left[node] != -1
+                assert tree.tree_.children_right[node] != -1
+
+                v = tree.tree_.feature[node]
+
+                node_left = tree.tree_.children_left[node]
+                node_right = tree.tree_.children_right[node]
+            
+                assert weighted_n_node_samples[node] == weighted_n_node_samples[node_left] + weighted_n_node_samples[node_right]
+
+                if flag[node] == True:
+            
+                    incre = weighted_n_node_samples[node] * (impurity[node] + impurity_train[node]) - weighted_n_node_samples[node_left] * (impurity[node_left] + impurity_train[node_left]) - weighted_n_node_samples[node_right] * (impurity_train[node_right] + impurity[node_right])
+                
+                    temp[v] += incre
+        
+            VI += temp / len(tree_X_inbag)
+        
+        return VI / n_estimators
+
+
+
+#     def oob_FI(self, X, y, n_subsamples_oob=None, var=None):
+
+#         VI = np.array([0.] * self.n_features_)
+
+#         n_estimators = self.n_estimators
+        
+#         n = self.n_samples_
+
+#         for index, tree in enumerate(self.estimators_):
+
+#             temp = np.array([0.] * self.n_features_)
+
+#             n_nodes = tree.tree_.node_count
+
+#             if n_subsamples_oob != None:
+
+#                 tree_random_instance = check_random_state(tree.random_state)
+#                 unsampled_indices = _generate_unsampled_indices(tree_random_instance, self.n_samples_, self.n_subsamples_)
+
+#                 assert n_subsamples_oob <= len(unsampled_indices)
+
+#                 idx = tree_random_instance.choice(unsampled_indices, n_subsamples_oob, replace=False)
+
+#                 tree_X = X[idx]
+#                 tree_y = y[idx]
+#                 n_outofbag = len(tree_y)
+
+#             else:
+#                 outofbag_index = (self.inbag_times_[:, index] == 0)
+#                 tree_X = X[outofbag_index]
+#                 tree_y = y[outofbag_index]
+#                 n_outofbag = len(tree_y)
+        
+#             tree_X_inbag = X.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+#             tree_y_inbag = y.repeat((self.inbag_times_[:, index]).astype("int"), axis = 0)
+#             decision_path_inbag = tree.decision_path(tree_X_inbag).todense()
+        
+#             decision_path = tree.decision_path(tree_X).todense()
+
+#             impurity = [0] * n_nodes
+
+#             # weighted_n_node_samples = np.array(np.sum(decision_path, axis = 0))[0]
+#             weighted_n_node_samples = np.array(np.sum(decision_path_inbag, axis = 0))[0]
+        
+#             for i in range(n_nodes):
+            
+#                 arr1 = tree_y[np.array(decision_path[:, i]).ravel().nonzero()[0].tolist()]
+#                 arr2 = tree_y_inbag[np.array(decision_path_inbag[:, i]).ravel().nonzero()[0].tolist()]
+            
+#                 if len(arr1) == 0:
+#                     # impurity[i] = 0
+#                     if sum(tree.tree_.children_left == i) > 0:
+#                         parent_node = np.arange(n_nodes)[tree.tree_.children_left == i][0]
+#                         impurity[i] = impurity[parent_node]
+#                     else:
+#                         parent_node = np.arange(n_nodes)[tree.tree_.children_right == i][0]
+#                         impurity[i] = impurity[parent_node]
+#                 else:
+# #                 p1 = float(sum(arr1)) / len(arr1)
+# #                 pp1 = float(sum(arr2)) / len(arr2)
+# #                 p2 = 1 - p1
+# #                 pp2 = 1- pp1
+
+# #                 impurity[i] = 1 - p1 * pp1 - p2 * pp2
+#                   impurity[i] = np.sum((arr1 - np.mean(arr2)) ** 2) / len(arr1)
+
+#             for node in range(n_nodes):
+
+#                 if tree.tree_.children_left[node] == -1 and tree.tree_.children_right[node] == -1:
+#                     continue
+                
+#                 assert tree.tree_.children_left[node] != -1
+#                 assert tree.tree_.children_right[node] != -1
+
+#                 v = tree.tree_.feature[node]
+
+#                 node_left = tree.tree_.children_left[node]
+#                 node_right = tree.tree_.children_right[node]
+            
+#                 assert weighted_n_node_samples[node] == weighted_n_node_samples[node_left] + weighted_n_node_samples[node_right]
+            
+#                 incre = (weighted_n_node_samples[node] * impurity[node] - weighted_n_node_samples[node_left] * impurity[node_left] - weighted_n_node_samples[node_right] * impurity[node_right])
+
+#                 temp[v] += incre
+        
+#             VI += temp / len(tree_X_inbag)
+        
+#         return VI / n_estimators
+    
+
+
+    # def oob_FI(self, X, y, n_subsamples_oob=None, var=None):
+
+    #     VI = np.array([0.] * self.n_features_)
+        
+    #     n_estimators = self.n_estimators
+    #     n = self.n_samples_
+
+    #     all_= np.zeros((self.n_features_, self.n_estimators))
+
+    #     for index, tree in enumerate(self.estimators_):
+
+    #         temp = np.array([0.] * self.n_features_)
+
+    #         if n_subsamples_oob != None:
+
+    #             tree_random_instance = check_random_state(tree.random_state)
+    #             unsampled_indices = _generate_unsampled_indices(tree_random_instance, self.n_samples_, self.n_subsamples_)
+
+    #             assert n_subsamples_oob <= len(unsampled_indices)
+
+    #             idx = tree_random_instance.choice(unsampled_indices, n_subsamples_oob, replace=False)
+
+    #             tree_X = X[idx]
+    #             tree_y = y[idx]
+    #             n_outofbag = len(tree_y)
+
+    #         else:
+    #             outofbag_index = (self.inbag_times_[:, index] == 0)
+    #             tree_X = X[outofbag_index]
+    #             tree_y = y[outofbag_index]
+    #             n_outofbag = len(tree_y)
+
+    #         for i in range(n_outofbag):
+
+    #             ix = tree_X[i, ]
+    #             iy = tree_y[i]
+
+    #             nodes = np.arange(tree.tree_.capacity)[np.array(tree.decision_path(ix.reshape(1, -1)).todense())[0] == 1]
+
+    #             values = tree.tree_.value.reshape(-1)[nodes]
+
+    #             for j in range(len(nodes)-1):
+    #                 index_node = nodes[j]
+    #                 v = tree.tree_.feature[index_node]
+    #                 temp[v] += (iy - values[j]) ** 2 - (iy - values[j+1]) ** 2 
+
+    #             all_[:, index] = temp / n_outofbag
+
+    #         VI += temp / len(tree_y)
+
+    #     if var == None:
+    #         return VI / n_estimators
+    #     else:
+
+    #         print("Starting variance estimation...")
+
+    #         inbag = np.zeros((self.n_samples_, self.n_estimators))
+    #         for t_idx in range(self.n_estimators):
+    #             sample_idx = _generate_sample_indices(self.estimators_[t_idx].random_state, self.n_samples_, self.n_subsamples_)
+    #             unsampled_indices = _generate_unsampled_indices(self.estimators_[t_idx].random_state, self.n_samples_, self.n_subsamples_)
+    #             idx = check_random_state(self.estimators_[t_idx].random_state).choice(unsampled_indices, n_subsamples_oob, replace=False)
+    #             inbag[:, t_idx] = np.bincount(np.append(sample_idx, idx), minlength=self.n_samples_)
+
+    #             assert sum(inbag[:, t_idx]) == self.n_subsamples_ + n_subsamples_oob
+
+    #         feature_importances_all_ = all_
+    #         inbag_times_ = inbag
+
+    #         cond_exp_full = np.zeros((self.n_samples_, self.n_features_))
+
+    #         for i in range(self.n_samples_):
+    #             cond_exp_full[i, :] = np.mean(feature_importances_all_[:, inbag_times_[i, :]==1], axis=1)
+
+    #         if var == "vector":
+    #             # zeta1_full = np.zeros(self.n_features_)
+    #             # zetan_full = np.zeros(self.n_features_)
+    #             # variance = np.zeros(self.n_features_)
+    #             # for i in range(self.n_features_):
+    #             #     zeta1_full[i] = np.var(cond_exp_full[:, i])
+    #             #     zetan_full[i] = np.var(feature_importances_all_[i, :])
+    #             zeta1_full = np.var(cond_exp_full, axis = 0)
+    #             zetan_full = np.var(feature_importances_all_, axis = 1)
+    #             variance = zeta1_full * ((self.n_subsamples_ + n_subsamples_oob) ** 2) / self.n_samples_ + zetan_full / self.n_estimators
+    #             return dict({"FI": VI / n_estimators, "variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
+    #         else:
+    #             zeta1_full = np.cov(cond_exp_full.T)
+    #             zetan_full = np.cov(feature_importances_all_)
+    #             covariance = ((self.n_subsamples_ + n_subsamples_oob) ** 2) / self.n_samples_ * zeta1_full + zetan_full / self.n_estimators
+    #             return dict({"FI": VI / n_estimators, "variance": variance, "zeta1_full": zeta1_full, "zetan_full": zetan_full})
+
+  
 
 
 class RandomForestClassifier(ForestClassifier):
